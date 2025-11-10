@@ -106,8 +106,9 @@ def segment_image(img_path, model_path):
 # --- Step 2: Background Inpainting (Stable Diffusion) ---
 def inpaint_background(img_path, mask_path, model_dir):
     """
-    Use Stable Diffusion inpainting to fill in the background.
-    The mask should be inverted so that white areas are inpainted.
+    Use Stable Diffusion inpainting to fill in the background (black zone of mask).
+    Black in mask = background to inpaint
+    White in mask = foreground to keep
     """
     # Load Stable Diffusion Inpainting Pipeline
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
@@ -131,14 +132,14 @@ def inpaint_background(img_path, mask_path, model_dir):
     image = Image.open(img_path).convert("RGB")
     mask = Image.open(mask_path).convert("L")
     
-    # Invert mask: white = areas to inpaint (background), black = keep (foreground)
+    # Invert mask: white = areas to inpaint (background/black zone), black = keep (foreground/white zone)
     mask_array = np.array(mask)
     inverted_mask = 255 - mask_array
     mask_inverted = Image.fromarray(inverted_mask).convert("L")
 
     # Generate inpainted background
-    prompt = "natural outdoor background, high quality, photorealistic"
-    negative_prompt = "blurry, low quality, distorted"
+    prompt = "beautiful sunset beach background, golden hour, scenic ocean view, high quality, photorealistic"
+    negative_prompt = "blurry, low quality, distorted, car, vehicle"
     
     result_img = pipe(
         prompt=prompt,
@@ -149,19 +150,20 @@ def inpaint_background(img_path, mask_path, model_dir):
         guidance_scale=7.5
     ).images[0]
     
-    result_img.save("stage2_inpainted.png")
+    result_img.save("stage2_background.png")
 
     del pipe
     if device != "cpu":
         torch.cuda.empty_cache()
     gc.collect()
-    return "stage2_inpainted.png"
+    return result_img, "stage2_background.png"
 
-# --- Step 3: Semantic Editing (Stable Diffusion Inpainting) ---
-def semantic_edit(img_path, mask_path, model_dir, prompt):
+# --- Step 3: Vehicle Regeneration (Stable Diffusion Inpainting) ---
+def regenerate_vehicle(img_path, mask_path, model_dir, prompt):
     """
-    Use Stable Diffusion to perform semantic editing on specific regions.
-    This can refine or change specific parts of the image based on the prompt.
+    Use Stable Diffusion to regenerate the vehicle (white zone of mask).
+    White in mask = vehicle to regenerate
+    Black in mask = background to keep
     """
     # Load Stable Diffusion Inpainting Pipeline
     pipe = StableDiffusionInpaintPipeline.from_pretrained(
@@ -185,32 +187,72 @@ def semantic_edit(img_path, mask_path, model_dir, prompt):
     image = Image.open(img_path).convert("RGB")
     mask = Image.open(mask_path).convert("L")
     
-    # For semantic editing, we might want to edit the background
-    # Invert mask: white = areas to edit (background), black = keep (foreground)
-    mask_array = np.array(mask)
-    inverted_mask = 255 - mask_array
-    mask_inverted = Image.fromarray(inverted_mask).convert("L")
+    # Use mask directly: white = areas to regenerate (vehicle), black = keep (background)
+    # No inversion needed for vehicle regeneration
 
-    # Generate edited image with custom prompt
-    negative_prompt = "blurry, low quality, distorted, ugly"
+    # Generate new vehicle with custom prompt
+    negative_prompt = "blurry, low quality, distorted, ugly, SUV, truck"
     
     result_img = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt,
         image=image,
-        mask_image=mask_inverted,
+        mask_image=mask,
         num_inference_steps=50,
         guidance_scale=7.5,
-        strength=0.8  # Controls how much to change the image
+        strength=0.9  # Higher strength to fully replace the vehicle
     ).images[0]
     
-    result_img.save("stage3_final.png")
+    result_img.save("stage3_vehicle.png")
 
     del pipe
     if device != "cpu":
         torch.cuda.empty_cache()
     gc.collect()
-    return "stage3_final.png"
+    return result_img, "stage3_vehicle.png"
+
+# --- Step 4: Combine Background and Vehicle ---
+def combine_results(background_img, vehicle_img, mask_path, output_path="final_combined.png"):
+    """
+    Combine the background from stage 2 and vehicle from stage 3.
+    White in mask = use vehicle image
+    Black in mask = use background image
+    """
+    # Load images
+    if isinstance(background_img, str):
+        background = Image.open(background_img).convert("RGB")
+    else:
+        background = background_img.convert("RGB")
+    
+    if isinstance(vehicle_img, str):
+        vehicle = Image.open(vehicle_img).convert("RGB")
+    else:
+        vehicle = vehicle_img.convert("RGB")
+    
+    mask = Image.open(mask_path).convert("L")
+    
+    # Ensure all images are the same size
+    size = background.size
+    vehicle = vehicle.resize(size)
+    mask = mask.resize(size)
+    
+    # Convert to numpy arrays
+    bg_array = np.array(background).astype(np.float32)
+    veh_array = np.array(vehicle).astype(np.float32)
+    mask_array = np.array(mask).astype(np.float32) / 255.0
+    
+    # Expand mask to 3 channels
+    mask_3d = np.stack([mask_array, mask_array, mask_array], axis=2)
+    
+    # Combine: white mask areas = vehicle, black mask areas = background
+    combined = (veh_array * mask_3d + bg_array * (1 - mask_3d)).astype(np.uint8)
+    
+    # Convert back to PIL image
+    result = Image.fromarray(combined)
+    result.save(output_path)
+    
+    print(f"✓ Combined image saved to: {output_path}")
+    return output_path
 
 # --- Entire Workflow ---
 if __name__ == "__main__":
@@ -236,15 +278,19 @@ if __name__ == "__main__":
     mask_path = segment_image(img_path, unet_path)
     print(f"✓ Mask saved to: {mask_path}")
 
-    # Stage 2: Inpainting
+    # Stage 2: Inpaint Background (black zone of mask)
     print("\n[Stage 2] Inpainting background with Stable Diffusion...")
-    inpainted_path = inpaint_background(img_path, mask_path, sd_model_path)
-    print(f"✓ Inpainted image saved to: {inpainted_path}")
+    background_img, background_path = inpaint_background(img_path, mask_path, sd_model_path)
+    print(f"✓ Background image saved to: {background_path}")
 
-    # Stage 3: Semantic Editing
-    print("\n[Stage 3] Applying semantic editing with Stable Diffusion...")
-    custom_prompt = "sleek modern sedan car, beautiful sunset beach background, golden hour, photorealistic, high quality, luxury sedan"
-    final_path = semantic_edit(inpainted_path, mask_path, sd_model_path, prompt=custom_prompt)
-    print(f"✓ Final edited image saved to: {final_path}")
+    # Stage 3: Regenerate Vehicle (white zone of mask)
+    print("\n[Stage 3] Regenerating vehicle with Stable Diffusion...")
+    vehicle_prompt = "luxury sedan car, photorealistic, high quality"
+    vehicle_img, vehicle_path = regenerate_vehicle(img_path, mask_path, sd_model_path, prompt=vehicle_prompt)
+    print(f"✓ Vehicle image saved to: {vehicle_path}")
+
+    # Stage 4: Combine Background and Vehicle
+    print("\n[Stage 4] Combining background and vehicle...")
+    final_path = combine_results(background_img, vehicle_img, mask_path, output_path="final_combined.png")
 
     print(f"\n🎉 Pipeline complete! Final image: {final_path}")
