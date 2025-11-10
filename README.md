@@ -58,39 +58,41 @@ An advanced AI-powered image editing pipeline that combines semantic segmentatio
    python main.py
    ```
 
+Note: The pipeline now writes all intermediate and final images into an `images/` folder created next to the working directory. On each run the script will create `images/` if missing and will clear any existing files inside it so every run starts with an empty `images/` folder.
+
 ## 📋 Pipeline Stages
 
-### Stage 1: Semantic Segmentation
-- **Model**: Custom U-Net architecture
+### Stage 1: Initial Segmentation (UNet / SAM)
+- **Model**: U-Net (or optionally SAM for segmentation assistance)
 - **Input**: Original image
-- **Output**: Binary mask (`stage1_mask.png`)
-- **Purpose**: Separates foreground (white) from background (black)
+- **Output**: Binary mask (`images/stage1_mask.png`)
+- **Purpose**: Identify the vehicle/foreground region in the original image (white = vehicle, black = background)
 
-### Stage 2: Background Generation
+### Stage 2: Vehicle Regeneration (Stable Diffusion Inpainting)
 - **Model**: Stable Diffusion Inpainting
-- **Input**: Original image + inverted mask
-- **Output**: New background (`stage2_background.png`)
-- **Purpose**: Generates scenic backgrounds (beaches, landscapes, etc.)
+- **Input**: Original image + Stage 1 mask
+- **Output**: Edited vehicle image (`images/stage2_vehicle.png`)
+- **Purpose**: Apply edits to the vehicle first (change model, color, style, etc.) using the mask to constrain edits to the vehicle area
 
-### Stage 3: Object Regeneration
+### Stage 3: Re-segmentation (UNet)
+- **Model**: U-Net
+- **Input**: The edited vehicle image (Stage 2 output)
+- **Output**: Fresh segmentation mask for the edited vehicle (`images/stage3_mask.png`)
+- **Purpose**: Create an accurate mask that fits the newly generated vehicle so the background can be regenerated around it
+
+### Stage 4: Background Inpainting (Stable Diffusion Inpainting)
 - **Model**: Stable Diffusion Inpainting
-- **Input**: Original image + mask
-- **Output**: Transformed object (`stage3_vehicle.png`)
-- **Purpose**: Changes vehicles, objects, or subjects
-
-### Stage 4: Intelligent Composition
-- **Method**: Mask-based blending
-- **Input**: Background + Object + Original mask
-- **Output**: Final composite (`final_combined.png`)
-- **Purpose**: Seamlessly combines all elements
+- **Input**: Edited vehicle image (Stage 2) + Stage 3 mask (inverted to indicate background areas)
+- **Output**: Final image with regenerated background (`images/stage4_final.png`)
+- **Purpose**: Generate a new background that naturally fits the edited vehicle; this is done last so the background adapts to the final vehicle appearance
 
 ## 🎨 Example Transformations
 
-| Original | Segmentation Mask | New Background | New Vehicle | Final Result |
-|----------|------------------|----------------|-------------|--------------|
-| ![Original](0a0e3fb8f782_01.jpg) | ![Mask](stage1_mask.png) | ![Background](stage2_background.png) | ![Vehicle](stage3_vehicle.png) | ![Final](final_combined.png) |
+| Original | Segmentation Mask | Edited Vehicle | Re-seg Mask | Final Result |
+|----------|------------------|----------------|------------:|--------------|
+| ![Original](0a0e3fb8f782_01.jpg) | ![Mask](images/stage1_mask.png) | ![Vehicle](images/stage2_vehicle.png) | ![Mask2](images/stage3_mask.png) | ![Final](images/stage4_final.png) |
 
-**Example**: SUV → Luxury Sedan + Urban Scene → Beach Sunset
+**Example**: SUV → Black Sedan; pipeline edits vehicle first, re-segments it, then regenerates the background to match the edited vehicle.
 
 ## 🔧 Configuration
 
