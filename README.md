@@ -14,6 +14,7 @@ An advanced AI-powered image editing pipeline that combines semantic segmentatio
 - **Background Inpainting**: Generate new backgrounds using Stable Diffusion
 - **Object Regeneration**: Transform objects (vehicles, etc.) using AI
 - **Intelligent Composition**: Seamlessly combine generated elements
+- **Interactive Web UI**: FastAPI backend with a stage-aware frontend for live previews
 - **GPU Acceleration**: Support for DirectML (AMD GPUs) and CUDA
 - **Modular Pipeline**: Easy to customize and extend
 
@@ -46,66 +47,74 @@ An advanced AI-powered image editing pipeline that combines semantic segmentatio
 
 ### Usage
 
-1. **Place your image** in the project root (e.g., `input_image.jpg`)
-
-2. **Update the image path** in `main.py`:
-   ```python
-   img_path = "your_image.jpg"  # Change this to your image file
+#### Option A — Interactive Web UI
+1. Launch the API server:
+   ```bash
+   uvicorn api:app --reload
    ```
+2. Open `http://localhost:8000/frontend/index.html` in your browser.
+3. Upload an image, configure the vehicle/background prompts and negative presets, then run the pipeline. Each stage preview (256×256) updates live as the generation completes. Outputs are stored under `images/<run_id>/`.
 
-3. **Run the pipeline**
+#### Option B — Command Line
+1. Place your image in the project root (e.g., `input_image.jpg`).
+2. Update the `img_path` value in `main.py` if necessary.
+3. Execute:
    ```bash
    python main.py
    ```
 
-Note: The pipeline now writes all intermediate and final images into an `images/` folder created next to the working directory. On each run the script will create `images/` if missing and will clear any existing files inside it so every run starts with an empty `images/` folder.
+The CLI run clears and reuses the shared `images/` directory, writing `stage1_mask.png`, `stage2_vehicle.png`, `stage3_mask.png`, and `stage4_final.png` on each execution.
+
+## 🧩 FastAPI Endpoints
+
+The web UI uses these staged endpoints (all return JSON with base64-encoded PNGs and a `run_id`):
+
+- `POST /api/stage1`: Upload image (`file`) to generate the initial segmentation mask.
+- `POST /api/stage2`: Provide `run_id`, `prompt`, and optional `negative_prompt` to regenerate the vehicle.
+- `POST /api/stage3`: Re-segment the edited vehicle (`run_id`).
+- `POST /api/stage4`: Supply `run_id`, background `prompt`, and optional `negative_prompt` to inpaint the background.
+
+Static assets are served under `/frontend` and a favicon is available at `/favicon.ico`.
 
 ## 📋 Pipeline Stages
 
 ### Stage 1: Initial Segmentation (UNet / SAM)
 - **Model**: U-Net (or optionally SAM for segmentation assistance)
 - **Input**: Original image
-- **Output**: Binary mask (`images/stage1_mask.png`)
+- **Output**: Binary mask (`images/stage1_mask.png` via CLI, `images/<run_id>/stage1_mask.png` via API)
 - **Purpose**: Identify the vehicle/foreground region in the original image (white = vehicle, black = background)
 
 ### Stage 2: Vehicle Regeneration (Stable Diffusion Inpainting)
 - **Model**: Stable Diffusion Inpainting
 - **Input**: Original image + Stage 1 mask
-- **Output**: Edited vehicle image (`images/stage2_vehicle.png`)
+- **Output**: Edited vehicle image (`images/stage2_vehicle.png` via CLI, `images/<run_id>/stage2_vehicle.png` via API)
 - **Purpose**: Apply edits to the vehicle first (change model, color, style, etc.) using the mask to constrain edits to the vehicle area
 
 ### Stage 3: Re-segmentation (UNet)
 - **Model**: U-Net
 - **Input**: The edited vehicle image (Stage 2 output)
-- **Output**: Fresh segmentation mask for the edited vehicle (`images/stage3_mask.png`)
+- **Output**: Fresh segmentation mask for the edited vehicle (`images/stage3_mask.png` via CLI, `images/<run_id>/stage3_mask.png` via API)
 - **Purpose**: Create an accurate mask that fits the newly generated vehicle so the background can be regenerated around it
 
 ### Stage 4: Background Inpainting (Stable Diffusion Inpainting)
 - **Model**: Stable Diffusion Inpainting
 - **Input**: Edited vehicle image (Stage 2) + Stage 3 mask (inverted to indicate background areas)
-- **Output**: Final image with regenerated background (`images/stage4_final.png`)
+- **Output**: Final image with regenerated background (`images/stage4_final.png` via CLI, `images/<run_id>/stage4_final.png` via API)
 - **Purpose**: Generate a new background that naturally fits the edited vehicle; this is done last so the background adapts to the final vehicle appearance
-
-## 🎨 Example Transformations
-
-| Original | Segmentation Mask | Edited Vehicle | Re-seg Mask | Final Result |
-|----------|------------------|----------------|------------:|--------------|
-| ![Original](0a0e3fb8f782_01.jpg) | ![Mask](images/stage1_mask.png) | ![Vehicle](images/stage2_vehicle.png) | ![Mask2](images/stage3_mask.png) | ![Final](images/stage4_final.png) |
-
-**Example**: SUV → Black Sedan; pipeline edits vehicle first, re-segments it, then regenerates the background to match the edited vehicle.
 
 ## 🔧 Configuration
 
 ### Customizing Prompts
 
-Edit the prompts in `main.py`:
+- **Web UI**: Adjust vehicle/background prompts and choose negative preset dropdowns for each stage. All requests propagate to the FastAPI endpoints.
+- **CLI**: Edit the prompt variables in `main.py`:
 
 ```python
 # Background generation prompt
-background_prompt = "beautiful sunset beach background, golden hour, scenic ocean view"
+background_prompt = "beautiful mountain road background, golden hour, scenic ocean view, high quality, photorealistic"
 
 # Object transformation prompt
-vehicle_prompt = "luxury sedan car, photorealistic, high quality, professional photography"
+vehicle_prompt = "black sedan car, photorealistic, high quality, detailed"
 ```
 
 ### Model Paths
@@ -114,7 +123,7 @@ The pipeline uses local models stored in the `model/` directory:
 
 ```
 model/
-├── unet_model.pth                    # U-Net segmentation model
+├── unet_coco_best.pth                # U-Net segmentation model
 └── stable-diffusion/                 # Stable Diffusion models
     └── models--runwayml--stable-diffusion-v1-5/
         └── snapshots/
@@ -131,21 +140,23 @@ The pipeline automatically detects and uses:
 ## 📁 Project Structure
 
 ```
-GenAI-for-Visual-Synthesis/
-├── main.py                          # Main pipeline script
-├── setup.py                         # Model download script
-├── requirements.txt                 # Python dependencies
-├── README.md                        # This file
-├── 0a0e3fb8f782_01.jpg              # Sample input image
+Genai_visual/
+├── api.py                           # FastAPI service exposing stage endpoints + UI
+├── main.py                          # Standalone pipeline script
+├── frontend/                        # HTML/CSS/JS frontend (served statically)
+│   ├── index.html                   # Vehicle Remix Studio UI
+│   ├── styles.css                   # Glassmorphism-inspired styling
+│   ├── app.js                       # Stage orchestration + fetch calls
+│   └── favicon.svg                  # Favicon served by `/favicon.ico`
+├── images/                          # Output directory (cleaned per CLI run)
 ├── model/                           # Pre-trained models
-│   ├── unet_model.pth              # U-Net weights
-│   └── stable-diffusion/           # Stable Diffusion models
-├── archive/                         # Additional utilities
-│   ├── extract_outdoor_data.py     # Data extraction script
-│   └── genai-depth-estimation.ipynb # Depth estimation notebook
-├── src/                            # Source code (if any)
-├── tested_images/                  # Test results
-└── stage[1-4]_*.png               # Pipeline outputs
+│   ├── unet_coco_best.pth           # U-Net weights
+│   └── stable-diffusion/            # Stable Diffusion checkpoints
+├── requirements.txt                 # Python dependencies (includes FastAPI + Uvicorn)
+├── setup.py                         # Model download helper
+├── PIPELINE_STRUCTURE.md            # Detailed stage breakdown
+├── README.md                        # This file
+└── src/                             # Supporting scripts and utilities
 ```
 
 ## 🛠️ Technical Details

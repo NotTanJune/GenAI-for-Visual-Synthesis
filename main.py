@@ -4,16 +4,18 @@ from PIL import Image
 import gc
 import os
 import shutil
+from pathlib import Path
 from typing import Optional
 
 # For Stable Diffusion inpainting
 from diffusers import StableDiffusionInpaintPipeline
 
 # Directory where pipeline images are stored
-IMAGES_DIR = os.path.join(os.getcwd(), "images")
+BASE_DIR = Path(__file__).resolve().parent
+IMAGES_DIR = BASE_DIR / "images"
 
 
-def prepare_images_dir(images_dir: Optional[str] = None):
+def prepare_images_dir(images_dir: Optional[Path] = None):
     """Create images folder if missing. If it contains files, clear them.
 
     This ensures each run starts with an empty `images/` directory.
@@ -21,21 +23,22 @@ def prepare_images_dir(images_dir: Optional[str] = None):
     if images_dir is None:
         images_dir = IMAGES_DIR
 
-    if not os.path.exists(images_dir):
-        os.makedirs(images_dir, exist_ok=True)
+    images_dir = Path(images_dir)
+
+    if not images_dir.exists():
+        images_dir.mkdir(parents=True, exist_ok=True)
         print(f"Created images directory: {images_dir}")
         return
 
     # If folder exists and is not empty, clear its contents
-    entries = os.listdir(images_dir)
+    entries = list(images_dir.iterdir())
     if entries:
         print(f"Images directory not empty ({len(entries)} items). Clearing...")
-        for name in entries:
-            path = os.path.join(images_dir, name)
+        for path in entries:
             try:
-                if os.path.isfile(path) or os.path.islink(path):
-                    os.remove(path)
-                elif os.path.isdir(path):
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
                     shutil.rmtree(path)
             except Exception as e:
                 print(f"Warning: failed to remove {path}: {e}")
@@ -44,79 +47,80 @@ def prepare_images_dir(images_dir: Optional[str] = None):
         print("Images directory exists and is empty")
 
 # --- Step 1: Foreground-Background Segmentation (U-Net) ---
+    
 class UNet(torch.nn.Module):
     def __init__(self, in_channels=3, out_channels=1):
         super(UNet, self).__init__()
         
         # Encoder (downsampling)
-        self.enc1 = self._block(in_channels, 64)
-        self.enc2 = self._block(64, 128)
-        self.enc3 = self._block(128, 256)
-        self.enc4 = self._block(256, 512)
+        self.enc1 = self.conv_block(in_channels, 64)
+        self.enc2 = self.conv_block(64, 128)
+        self.enc3 = self.conv_block(128, 256)
+        self.enc4 = self.conv_block(256, 512)
         
         # Bottleneck
-        self.bottleneck = self._block(512, 1024)
+        self.bottleneck = self.conv_block(512, 1024)
         
         # Decoder (upsampling)
-        self.upconv4 = torch.nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        self.dec4 = self._block(1024, 512)
+        self.upconv4 = torch.nn.ConvTranspose2d(1024, 512, 2, stride=2)
+        self.dec4 = self.conv_block(1024, 512)
         
-        self.upconv3 = torch.nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        self.dec3 = self._block(512, 256)
+        self.upconv3 = torch.nn.ConvTranspose2d(512, 256, 2, stride=2)
+        self.dec3 = self.conv_block(512, 256)
         
-        self.upconv2 = torch.nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        self.dec2 = self._block(256, 128)
+        self.upconv2 = torch.nn.ConvTranspose2d(256, 128, 2, stride=2)
+        self.dec2 = self.conv_block(256, 128)
         
-        self.upconv1 = torch.nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.dec1 = self._block(128, 64)
+        self.upconv1 = torch.nn.ConvTranspose2d(128, 64, 2, stride=2)
+        self.dec1 = self.conv_block(128, 64)
         
         # Output layer
-        self.out = torch.nn.Conv2d(64, out_channels, kernel_size=1)
+        self.out = torch.nn.Conv2d(64, out_channels, 1)
         
-        # Pooling
-        self.pool = torch.nn.MaxPool2d(kernel_size=2, stride=2)
-    
-    def _block(self, in_channels, out_channels):
+        self.pool = torch.nn.MaxPool2d(2, 2)
+        
+    def conv_block(self, in_ch, out_ch):
         return torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            torch.nn.BatchNorm2d(out_channels),
+            torch.nn.Conv2d(in_ch, out_ch, 3, padding=1),
+            torch.nn.BatchNorm2d(out_ch),
             torch.nn.ReLU(inplace=True),
-            torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            torch.nn.BatchNorm2d(out_channels),
+            torch.nn.Conv2d(out_ch, out_ch, 3, padding=1),
+            torch.nn.BatchNorm2d(out_ch),
             torch.nn.ReLU(inplace=True)
         )
     
     def forward(self, x):
-        # Encoder
-        enc1 = self.enc1(x)
-        enc2 = self.enc2(self.pool(enc1))
-        enc3 = self.enc3(self.pool(enc2))
-        enc4 = self.enc4(self.pool(enc3))
+        # Encoder with skip connections
+        e1 = self.enc1(x)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
         
         # Bottleneck
-        bottleneck = self.bottleneck(self.pool(enc4))
+        b = self.bottleneck(self.pool(e4))
         
         # Decoder with skip connections
-        dec4 = self.upconv4(bottleneck)
-        dec4 = torch.cat([dec4, enc4], dim=1)
-        dec4 = self.dec4(dec4)
+        d4 = self.upconv4(b)
+        d4 = torch.cat([d4, e4], dim=1)
+        d4 = self.dec4(d4)
         
-        dec3 = self.upconv3(dec4)
-        dec3 = torch.cat([dec3, enc3], dim=1)
-        dec3 = self.dec3(dec3)
+        d3 = self.upconv3(d4)
+        d3 = torch.cat([d3, e3], dim=1)
+        d3 = self.dec3(d3)
         
-        dec2 = self.upconv2(dec3)
-        dec2 = torch.cat([dec2, enc2], dim=1)
-        dec2 = self.dec2(dec2)
+        d2 = self.upconv2(d3)
+        d2 = torch.cat([d2, e2], dim=1)
+        d2 = self.dec2(d2)
         
-        dec1 = self.upconv1(dec2)
-        dec1 = torch.cat([dec1, enc1], dim=1)
-        dec1 = self.dec1(dec1)
+        d1 = self.upconv1(d2)
+        d1 = torch.cat([d1, e1], dim=1)
+        d1 = self.dec1(d1)
         
-        # Output
-        return torch.sigmoid(self.out(dec1))
+        # Output with sigmoid activation
+        out = torch.sigmoid(self.out(d1))
+        return out
 
-def segment_image(img_path, model_path):
+def segment_image(img_path, model_path, output_dir: Optional[Path] = None, output_name: str = "stage1_mask.png"):
     # Load model
     unet = UNet()
     unet.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
@@ -133,16 +137,18 @@ def segment_image(img_path, model_path):
     mask_img = (mask > 0.5).astype("uint8") * 255
     mask_pil = Image.fromarray(mask_img).convert("L")
     # Save into images/ folder
-    mask_output = os.path.join(IMAGES_DIR, "stage1_mask.png")
+    output_dir = Path(output_dir) if output_dir else IMAGES_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    mask_output = output_dir / output_name
     mask_pil.save(mask_output)
 
     del unet
     torch.cuda.empty_cache()
     gc.collect()
-    return mask_output
+    return str(mask_output)
 
 # --- Step 2: Vehicle Regeneration (Stable Diffusion Inpainting) ---
-def regenerate_vehicle(img_path, mask_path, model_dir, prompt):
+def regenerate_vehicle(img_path, mask_path, model_dir, prompt, negative_prompt="blurry, low quality, distorted, ugly car, deformed vehicle", output_dir: Optional[Path] = None, output_name: str = "stage2_vehicle.png"):
     """
     Use Stable Diffusion to regenerate the vehicle (white zone of mask).
     White in mask = vehicle to regenerate
@@ -166,37 +172,38 @@ def regenerate_vehicle(img_path, mask_path, model_dir, prompt):
         pipe = pipe.to(device)
         print("Using CPU")
 
-    # Load image and mask
-    image = Image.open(img_path).convert("RGB")
-    mask = Image.open(mask_path).convert("L")
+    # Load image and mask, resize to 256x256
+    image = Image.open(img_path).convert("RGB").resize((256, 256))
+    mask = Image.open(mask_path).convert("L").resize((256, 256))
     
     # Use mask directly: white = areas to regenerate (vehicle), black = keep (background)
     # No inversion needed for vehicle regeneration
 
     # Generate new vehicle with custom prompt
-    negative_prompt = "blurry, low quality, distorted, ugly, SUV, truck"
-    
     result_img = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt,
+        mask_threshold=0.3,
         image=image,
         mask_image=mask,
         num_inference_steps=50,
-        guidance_scale=7.5,
-        strength=0.9  # Higher strength to fully replace the vehicle
+        guidance_scale=10,
+        # strength=0.9  # Higher strength to fully replace the vehicle
     ).images[0]
     
-    vehicle_output = os.path.join(IMAGES_DIR, "stage2_vehicle.png")
+    output_dir = Path(output_dir) if output_dir else IMAGES_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    vehicle_output = output_dir / output_name
     result_img.save(vehicle_output)
 
     del pipe
     if device != "cpu":
         torch.cuda.empty_cache()
     gc.collect()
-    return result_img, vehicle_output
+    return result_img, str(vehicle_output)
 
 # --- Step 3: Re-segment the edited image ---
-def segment_edited_image(img_path, model_path, output_name="stage3_mask.png"):
+def segment_edited_image(img_path, model_path, output_dir: Optional[Path] = None, output_name="stage3_mask.png"):
     """
     Perform segmentation again on the edited vehicle image.
     This creates a fresh mask for the newly generated vehicle.
@@ -217,19 +224,20 @@ def segment_edited_image(img_path, model_path, output_name="stage3_mask.png"):
     mask_img = (mask > 0.5).astype("uint8") * 255
     mask_pil = Image.fromarray(mask_img).convert("L")
     # Ensure saved to images folder
-    if not os.path.isabs(output_name):
-        output_name = os.path.join(IMAGES_DIR, output_name)
-    mask_pil.save(output_name)
+    output_dir = Path(output_dir) if output_dir else IMAGES_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / output_name
+    mask_pil.save(output_path)
 
     del unet
     torch.cuda.empty_cache()
     gc.collect()
     
-    print(f"✓ Re-segmentation mask saved to: {output_name}")
-    return output_name
+    print(f"✓ Re-segmentation mask saved to: {output_path}")
+    return str(output_path)
 
 # --- Step 4: Background Inpainting (Stable Diffusion) ---
-def inpaint_background(img_path, mask_path, model_dir):
+def inpaint_background(img_path, mask_path, model_dir, prompt="beautiful mountain road background, golden hour, scenic ocean view, high quality, photorealistic", negative_prompt="blurry, low quality, distorted, car, vehicle, text, watermark", output_dir: Optional[Path] = None, output_name: str = "stage4_final.png"):
     """
     Use Stable Diffusion inpainting to fill in the background (black zone of mask).
     Black in mask = background to inpaint
@@ -253,9 +261,9 @@ def inpaint_background(img_path, mask_path, model_dir):
         pipe = pipe.to(device)
         print("Using CPU")
 
-    # Load image and mask
-    image = Image.open(img_path).convert("RGB")
-    mask = Image.open(mask_path).convert("L")
+    # Load image and mask, resize to 256x256
+    image = Image.open(img_path).convert("RGB").resize((256, 256))
+    mask = Image.open(mask_path).convert("L").resize((256, 256))
     
     # Invert mask: white = areas to inpaint (background/black zone), black = keep (foreground/white zone)
     mask_array = np.array(mask)
@@ -263,19 +271,18 @@ def inpaint_background(img_path, mask_path, model_dir):
     mask_inverted = Image.fromarray(inverted_mask).convert("L")
 
     # Generate inpainted background
-    prompt = "beautiful sunset beach background, golden hour, scenic ocean view, high quality, photorealistic"
-    negative_prompt = "blurry, low quality, distorted, car, vehicle"
-    
     result_img = pipe(
         prompt=prompt,
         negative_prompt=negative_prompt,
         image=image,
         mask_image=mask_inverted,
         num_inference_steps=50,
-        guidance_scale=7.5
+        guidance_scale=10
     ).images[0]
     
-    final_output = os.path.join(IMAGES_DIR, "stage4_final.png")
+    output_dir = Path(output_dir) if output_dir else IMAGES_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
+    final_output = output_dir / output_name
     result_img.save(final_output)
 
     del pipe
@@ -284,23 +291,23 @@ def inpaint_background(img_path, mask_path, model_dir):
     gc.collect()
     
     print(f"✓ Final image with inpainted background saved to: {final_output}")
-    return result_img, final_output
+    return result_img, str(final_output)
 
 # --- Entire Workflow ---
 if __name__ == "__main__":
-    img_path = "0a0e3fb8f782_01.jpg"
-    model_folder = "model"
+    img_path = "0a2bbd5330a2_03.jpg"
+    model_folder = BASE_DIR / "model"
     
     # Path to UNet model for segmentation
-    unet_path = os.path.join(model_folder, "unet_model.pth")
+    unet_path = model_folder / "unet_coco_best.pth"
     
     # Path to Stable Diffusion model
-    sd_model_path = os.path.join(
-        model_folder, 
-        "stable-diffusion",
-        "models--runwayml--stable-diffusion-v1-5",
-        "snapshots",
-        "451f4fe16113bff5a5d2269ed5ad43b0592e9a14"
+    sd_model_path = (
+        model_folder
+        / "stable-diffusion"
+        / "models--runwayml--stable-diffusion-v1-5"
+        / "snapshots"
+        / "451f4fe16113bff5a5d2269ed5ad43b0592e9a14"
     )
 
     print("Starting image editing pipeline...")
@@ -334,8 +341,8 @@ if __name__ == "__main__":
     print("\n" + "="*60)
     print(f"🎉 Pipeline complete! Final image: {final_path}")
     print("\nPipeline summary:")
-    print(f"  1. Initial segmentation → {os.path.join(IMAGES_DIR, 'stage1_mask.png')}")
-    print(f"  2. Vehicle editing → {os.path.join(IMAGES_DIR, 'stage2_vehicle.png')}")
-    print(f"  3. Re-segmentation → {os.path.join(IMAGES_DIR, 'stage3_mask.png')}")
-    print(f"  4. Background inpainting → {os.path.join(IMAGES_DIR, 'stage4_final.png')}")
+    print(f"  1. Initial segmentation → {IMAGES_DIR / 'stage1_mask.png'}")
+    print(f"  2. Vehicle editing → {IMAGES_DIR / 'stage2_vehicle.png'}")
+    print(f"  3. Re-segmentation → {IMAGES_DIR / 'stage3_mask.png'}")
+    print(f"  4. Background inpainting → {IMAGES_DIR / 'stage4_final.png'}")
 

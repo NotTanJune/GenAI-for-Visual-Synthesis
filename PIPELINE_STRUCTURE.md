@@ -1,7 +1,7 @@
 # Updated Image Editing Pipeline Structure
 
 ## Overview
-This pipeline performs sophisticated vehicle editing with background regeneration through a 4-stage process.
+This pipeline performs controllable vehicle-focused editing with background regeneration through a 4-stage process, orchestrated either from the CLI (`python main.py`) or the FastAPI service (`api.py`).
 
 ## Pipeline Flow
 
@@ -17,8 +17,8 @@ This pipeline performs sophisticated vehicle editing with background regeneratio
 │  ────────────────────────────────────────────────────────       │
 │  • Function: segment_image()                                    │
 │  • Purpose: Identify vehicle region in original image           │
-│  • Model: UNet (unet_model.pth)                                 │
-│  • Output: stage1_mask.png                                      │
+│  • Model: UNet (`model/unet_coco_best.pth`)                     │
+│  • Output: `stage1_mask.png` (stored at `images/` or `images/<run_id>/`) │
 │  • Mask: White = vehicle, Black = background                    │
 └────────────────────────────┬────────────────────────────────────┘
                              │
@@ -30,8 +30,8 @@ This pipeline performs sophisticated vehicle editing with background regeneratio
 │  • Purpose: Generate edits for car/vehicle                      │
 │  • Model: Stable Diffusion Inpainting                           │
 │  • Input: Original image + Stage 1 mask                         │
-│  • Prompt: "black sedan car, photorealistic, high quality..."  │
-│  • Output: stage2_vehicle.png (edited vehicle)                  │
+│  • Prompt: custom vehicle text prompt (UI/CLI configurable)     │
+│  • Output: `stage2_vehicle.png` (edited vehicle)                │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
@@ -40,7 +40,7 @@ This pipeline performs sophisticated vehicle editing with background regeneratio
 │  ────────────────────────────────────────────────────────       │
 │  • Function: segment_edited_image()                             │
 │  • Purpose: Create fresh mask for newly generated vehicle       │
-│  • Model: UNet (unet_model.pth)                                 │
+│  • Model: UNet (`model/unet_coco_best.pth`)                     │
 │  • Input: Stage 2 vehicle image                                 │
 │  • Output: stage3_mask.png                                      │
 │  • Mask: White = new vehicle, Black = background                │
@@ -54,8 +54,8 @@ This pipeline performs sophisticated vehicle editing with background regeneratio
 │  • Purpose: Generate new background around edited vehicle       │
 │  • Model: Stable Diffusion Inpainting                           │
 │  • Input: Stage 2 vehicle + Stage 3 mask (inverted)             │
-│  • Prompt: "beautiful sunset beach background, golden hour..."  │
-│  • Output: stage4_final.png (FINAL IMAGE)                       │
+│  • Prompt: custom background prompt (UI/CLI configurable)       │
+│  • Output: `stage4_final.png` (FINAL IMAGE)                     │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
@@ -95,21 +95,31 @@ This pipeline performs sophisticated vehicle editing with background regeneratio
 | 3 | `stage3_mask.png` | Re-segmented mask of edited vehicle |
 | 4 | `stage4_final.png` | **Final output** with edited vehicle + new background |
 
+> **Note:** The API stores each run in `images/<run_id>/stage*_*.png`, while the CLI writes to the shared `images/` folder.
+
 ## Usage
 
 ```bash
+# Command-line pipeline
 python main.py
+
+# FastAPI service (serves the web UI at http://localhost:8000/frontend/index.html)
+uvicorn api:app --reload
 ```
 
 Ensure you have:
-- Input image: `0a0e3fb8f782_01.jpg`
-- UNet model: `model/unet_model.pth`
-- Stable Diffusion model in: `model/stable-diffusion/...`
+- Input image (e.g., `0a0e3fb8f782_01.jpg`) available when running the CLI
+- UNet model: `model/unet_coco_best.pth`
+- Stable Diffusion snapshot: `model/stable-diffusion/models--runwayml--stable-diffusion-v1-5/snapshots/451f4fe16113bff5a5d2269ed5ad43b0592e9a14/`
 
 ## Customization
 
-You can modify the prompts in `main.py`:
+Prompts are configurable from the CLI (`main.py`) and the web UI:
 
-- **Vehicle prompt** (line 268): Change vehicle appearance
-- **Background prompt** (line 145): Change background scene
-- **Negative prompts**: Control what to avoid in generation
+```python
+# main.py defaults
+vehicle_prompt = "black sedan car, photorealistic, high quality, detailed"
+background_prompt = "beautiful mountain road background, golden hour, scenic ocean view, high quality, photorealistic"
+```
+
+**Negative prompts** are exposed through dropdown presets in the web UI (vehicle + background) and can be overridden via API parameters for fine-grained control.

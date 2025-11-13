@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Vehicle Remix Studio</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+	<link rel="icon" href="/frontend/favicon.svg" type="image/svg+xml">
+	<link rel="stylesheet" href="/frontend/styles.css?v=2">
+	<script src="/frontend/app.js?v=2" defer></script>
+</head>
+<body>
+	<div class="page-wrapper">
+		<header class="top-bar">
+			<div class="title-block">
+				<h1>Vehicle Remix Studio</h1>
+				<p class="subtitle">Stage-by-stage control for photorealistic vehicle edits.</p>
+			</div>
+			<div class="status-chip" id="statusChip">Idle</div>
+		</header>
+
+		<main class="main-grid">
+			<form class="panel input-panel" id="controlForm">
+				<h2>1 · Source & Prompts</h2>
+				<p class="panel-subtext">Upload a vehicle shot, tune prompts, and launch the guided pipeline.</p>
+
+				<div class="upload-zone" id="uploadZone">
+					<input type="file" id="imageInput" accept="image/*" hidden>
+					<div class="upload-content">
+						<div class="upload-icon">📷</div>
+						<p><strong>Drop an image</strong> or <button type="button" id="browseButton">browse files</button></p>
+						<span class="hint">Recommended: 512×512 square crop for best results.</span>
+					</div>
+					<img id="previewImage" alt="Preview" class="preview" hidden>
+				</div>
+
+				<div class="prompt-columns">
+					<section class="prompt-card">
+						<h3>Vehicle Diffusion</h3>
+						<label for="vehiclePrompt" class="field-label">Creative prompt</label>
+						<textarea id="vehiclePrompt" name="vehiclePrompt" rows="4" placeholder="e.g. gleaming midnight blue sports car, cinematic lighting, wet asphalt reflections" required></textarea>
+
+						<label for="vehicleNegative" class="field-label">Negative preset</label>
+						<select id="vehicleNegative" name="vehicleNegative">
+							<option value="blurry, unclear, low quality, distorted, duplicate, text, watermark, jpeg artifacts" selected>Balanced realism – blurry, unclear, low quality, duplicate artifacts</option>
+							<option value="cartoon, illustration, anime, cel shading, stylized, toy-like">No cartoon vibes – cartoon, illustration, anime, stylized assets</option>
+							<option value="rusted, damaged, broken parts, dents, scratches, dirty, mud, graffiti">Keep vehicle pristine – rusted or damaged bodywork, grime</option>
+							<option value="oversaturated, harsh shadows, blown highlights, uneven lighting, lens flare">Avoid harsh lighting – oversaturated or uneven lighting artifacts</option>
+						</select>
+					</section>
+
+					<section class="prompt-card">
+						<h3>Background Inpainting</h3>
+						<label for="backgroundPrompt" class="field-label">Scenery prompt</label>
+						<textarea id="backgroundPrompt" name="backgroundPrompt" rows="4" placeholder="e.g. neon-lit downtown street at dusk, rain-soaked pavement, cinematic bokeh" required></textarea>
+
+						<label for="backgroundNegative" class="field-label">Negative preset</label>
+						<select id="backgroundNegative" name="backgroundNegative">
+							<option value="blurry, unclear, low quality, distorted, duplicate, text, watermark, jpeg artifacts, washed out" selected>Balanced environment – blurry, unclear, duplicate, washed-out frames</option>
+							<option value="flat colors, dull lighting, empty scene, bland, grey tones, desaturated, lifeless">Keep it vibrant – flat colors, dull lighting, lifeless scenes</option>
+							<option value="crowded, busy, pedestrians, traffic, people, cars, buses, clutter">No extra people – busy crowds, traffic, clutter</option>
+							<option value="foggy, hazy, overexposed, blown highlights, lens flare, smoke, smog">Clear visibility – fog, haze, blown highlights, smoke</option>
+						</select>
+					</section>
+				</div>
+
+				<section class="info-card pipeline-flow">
+					<h3>Pipeline Flow</h3>
+					<ol>
+						<li>
+							<strong>Stage 1 · Segmentation</strong>
+							<span>UNet locates the vehicle and writes <code>stage1_mask.png</code>.</span>
+						</li>
+						<li>
+							<strong>Stage 2 · Vehicle Regeneration</strong>
+							<span>Stable Diffusion redraws the car using your prompt and saves <code>stage2_vehicle.png</code>.</span>
+						</li>
+						<li>
+							<strong>Stage 3 · Re-segmentation</strong>
+							<span>UNet re-masks the edited vehicle into <code>stage3_mask.png</code>.</span>
+						</li>
+						<li>
+							<strong>Stage 4 · Background Inpainting</strong>
+							<span>Stable Diffusion regenerates the scene, producing <code>stage4_final.png</code>.</span>
+						</li>
+					</ol>
+					<p class="flow-note">CLI runs write to <code>images/</code>; the web UI keeps each session under <code>images/&lt;run_id&gt;/</code>.</p>
+				</section>
+
+				<section class="info-card pipeline-benefits">
+					<h3>Why This Order?</h3>
+					<ul>
+						<li><strong>Vehicle-first edits</strong> let the background adapt to the final design instead of the other way around.</li>
+						<li><strong>Fresh masking</strong> after regeneration keeps the silhouette crisp when scenery changes.</li>
+						<li><strong>Single-pass compositing</strong> avoids manual merges—Stable Diffusion handles the final blend automatically.</li>
+						<li><strong>Run isolation</strong> keeps every API session in its own folder for easy comparisons.</li>
+					</ul>
+				</section>
+
+				<button type="submit" class="primary-action" id="runButton">Run Pipeline</button>
+			</form>
+
+			<section class="panel output-panel">
+				<h2>2 · Stage Output Gallery</h2>
+				<p class="panel-subtext">Preview each step as it completes. Results update live while the pipeline runs.</p>
+
+				<div class="stage-grid" id="stageGrid">
+					<article class="stage-card" data-stage="1">
+						<header>
+							<span class="stage-tag">Stage 1</span>
+							<h3>Segmentation Mask</h3>
+						</header>
+						<div class="image-shell loading">
+							<div class="spinner"></div>
+							<img alt="Stage 1 output" hidden>
+						</div>
+						<p class="stage-note">UNet isolates the vehicle silhouette.</p>
+					</article>
+
+					<article class="stage-card" data-stage="2">
+						<header>
+							<span class="stage-tag">Stage 2</span>
+							<h3>Vehicle Re-render</h3>
+						</header>
+						<div class="image-shell loading">
+							<div class="spinner"></div>
+							<img alt="Stage 2 output" hidden>
+						</div>
+						<p class="stage-note">Stable diffusion redraws the car using your prompt.</p>
+					</article>
+
+					<article class="stage-card" data-stage="3">
+						<header>
+							<span class="stage-tag">Stage 3</span>
+							<h3>Refined Mask</h3>
+						</header>
+						<div class="image-shell loading">
+							<div class="spinner"></div>
+							<img alt="Stage 3 output" hidden>
+						</div>
+						<p class="stage-note">Fresh mask tuned to the edited vehicle.</p>
+					</article>
+
+					<article class="stage-card" data-stage="4">
+						<header>
+							<span class="stage-tag">Stage 4</span>
+							<h3>Final Composite</h3>
+						</header>
+						<div class="image-shell loading">
+							<div class="spinner"></div>
+							<img alt="Stage 4 output" hidden>
+						</div>
+						<p class="stage-note">Background inpainting blends the new scene.</p>
+					</article>
+				</div>
+			</section>
+		</main>
+	</div>
+
+	<div class="toast" id="toast" hidden>
+		<span id="toastMessage"></span>
+	</div>
+</body>
+</html>

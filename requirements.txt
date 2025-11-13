@@ -5,3 +5,6 @@ diffusers
 transformers
 accelerate
 safetensors
+fastapi
+uvicorn[standard]
+python-multipart
